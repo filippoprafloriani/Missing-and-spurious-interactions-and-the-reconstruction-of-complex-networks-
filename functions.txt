@@ -1,0 +1,518 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from itertools import product
+import math
+from scipy.special import binom
+from sklearn.metrics import roc_auc_score, normalized_mutual_info_score
+import random
+import time
+import networkx as nx
+
+def remove_links(links, perc_err):
+    index = random.sample(range(0,len(links)),int((1-perc_err)*len(links)))
+    links_ = np.array(links)
+    links_ = links_[index].tolist()
+    links_ = list(tuple(i) for x,i in enumerate(links_))
+    return links_
+
+def add_links(N, links, perc_err):
+    
+    all_links = []
+    for n in range(N):
+        for m in range(n):
+            all_links.append((m,n))
+    
+    candidate_links = list(set(all_links).difference(links))
+    index = random.sample(range(0,len(candidate_links)),int((perc_err)*len(links)))
+    spur_links = np.array(candidate_links)[index].tolist()
+    spur_links = list(tuple(i) for x,i in enumerate(spur_links))
+    links_sp = links + spur_links
+    
+    return links_sp
+
+def add_and_remove_links(N, links, perc_err):
+    
+    #compute the links that will be added
+    all_links = []
+    for n in range(N):
+        for m in range(n):
+            all_links.append((m,n))
+    
+    candidate_links = list(set(all_links).difference(links))
+    index = random.sample(range(0,len(candidate_links)),int((perc_err)*len(links)))
+    spur_links = np.array(candidate_links)[index].tolist()
+    spur_links = list(tuple(i) for x,i in enumerate(spur_links))
+
+    #remove a % of links
+    index = random.sample(range(0,len(links)),int((1-perc_err)*len(links)))
+    links_1 = np.array(links)
+    links_1 = links_1[index].tolist()
+    links_1 = list(tuple(i) for x,i in enumerate(links_1))
+    
+    #add a % of links
+    links_2 = links_1 + spur_links
+    
+    return links_2
+
+#CHANGED BY YOU
+def get_l_vec(group, N, edges):
+    #l^O = number of links in the observe network between groups i and j
+    ##i and j are groups
+    link_shape = np.array(edges).shape
+    links_groups = group[np.array(edges).reshape((link_shape[0]*link_shape[1]))].reshape(link_shape)
+    links_groups_ordered = np.concatenate((np.array([np.min(links_groups,axis=1)]).T,np.array([np.max(links_groups,axis=1)]).T),axis=1)
+    unique_l, counts_l = np.unique(links_groups_ordered, return_counts=True, axis = 0)
+    l_ab = np.zeros((N,N))
+    unique_trans = unique_l.T
+    l_ab[unique_trans[0].astype(int), unique_trans[1].astype(int)] = counts_l
+    
+    i_lower = np.tril_indices(N, -1)
+    l_ab[i_lower] = l_ab.T[i_lower] 
+    return l_ab
+
+#CHANGED BY YOU
+def get_r_vec(group,N):
+    # r = maximum posible number of links between groups i and j
+    N_a = np.zeros(N)
+    unique_r, counts_r = np.unique(group, return_counts=True)
+    N_a[unique_r.astype(int)] = counts_r
+    r_ab = np.outer(N_a, N_a)
+    return r_ab
+
+#CHAMGED BY YOU
+def H(group, N, edges):
+    r_ab = get_r_vec(group, N)
+    l_ab = get_l_vec(group, N, edges)
+    combinatorial = binom(r_ab, l_ab)
+    combinatorial = combinatorial[np.triu_indices(N)]
+    log_comb = np.log(combinatorial)
+    
+    r_triu = r_ab[np.triu_indices(N)]
+    log_r = np.log(r_triu + 1)
+
+    H=np.sum(log_r + log_comb)
+
+    return (H)
+
+def metropolis(N, edges, max_steps):
+    group_0 = np.random.randint(0,N,N)
+    group_curr = group_0
+    H_chain = np.zeros(max_steps)
+    group_chain = np.zeros((max_steps,N))
+
+    start_time = time.time()
+    for t in range(max_steps):
+        node_rnd = np.random.randint(0,N,1)
+        group_rnd = np.random.randint(0,N,1)
+        group_prop = np.copy(group_curr)
+        group_prop[node_rnd] = group_rnd
+        
+        acceptance = math.exp(-(H(group_prop, N, edges) - H(group_curr, N, edges)))
+        rnd = np.random.random(1)
+        if rnd <= acceptance:
+            group_curr = group_prop
+            value_prop = math.exp(-H(group_prop, N, edges) + 250)    #multiply by e^500, because of machine precision, it will not affect final R_ij
+            H_save = value_prop            
+        else:
+            value_curr = math.exp(-H(group_curr, N, edges) + 250)    #multiply by e^500, because of machine precision, it will not affect final R_ij
+            H_save = value_curr
+
+        H_chain[t] = H_save
+        group_chain[t,:] = group_curr
+
+    end_time = time.time()
+    elapsed_time = end_time - start_time
+    
+    return (group_chain, H_chain, elapsed_time)
+
+#NEW
+def change_chain(chain, n_burn_in, thinning):
+    chain_new = chain[0][n_burn_in::thinning], chain[1][n_burn_in::thinning]
+    return chain_new
+
+#CHANGED BY YOU
+def R_vector(chain, edges_obs, G):
+    N = G.number_of_nodes()
+    adjacency = nx.to_numpy_array(G)
+    adjacency[adjacency != 0] = 1
+    Z = np.sum(chain[1])
+    R_t = 0
+    for t in range(len(chain[1])):
+        groups_t = chain[0][t,:].astype(int)
+        l_ab = get_l_vec(groups_t,N,edges_obs)
+        r_ab = get_r_vec(groups_t,N) 
+        l_ij = l_ab[groups_t].T[groups_t].T
+        r_ij = r_ab[groups_t].T[groups_t].T
+        R_t = R_t + (l_ij+1)/(r_ij+2)*chain[1][t]
+        
+    R_t = R_t/Z
+    Rt_triu = R_t[np.triu_indices(N)]
+    adj_triu = adjacency[np.triu_indices(N)]
+    return (adj_triu, Rt_triu)
+
+def mutual_info(chain,T=3_000,initial =1_500, thinning=500, plot = True, x_lim_dx = None):
+    mutual_info = np.zeros(T-initial)
+    
+    for t in range(T-initial+thinning-1):
+        mutual_info[t] = normalized_mutual_info_score(chain[0][initial],chain[0][initial+t])
+
+    if plot:
+        time = np.arange(initial, T)
+        plt.plot(time,mutual_info)
+        plt.title('Mutual info between 1 point and its consecutive ones')
+        plt.ylabel('Mutual info')
+        plt.xlabel('Number of consecutive steps')
+        if x_lim_dx is not None:
+            plt.xlim(initial, x_lim_dx)
+        plt.show()
+        
+    return (mutual_info)
+
+#CHANGED
+def mutual_info_equilibrium(chain,T=3_000,initial =1_500, thinning = 200, plot = True, x_lim_dx = None):
+    mutual_info_eq = np.zeros(T-initial)
+    
+    for t in range(0,(T-initial),thinning):    #evaluate mutual information over consecutive samples after thinning
+        if (initial+t+thinning) == T:
+            break
+        mutual_info_eq[t] = normalized_mutual_info_score(chain[0][initial+t], chain[0][initial+t+thinning])
+    mutual_info_eq = mutual_info_eq[mutual_info_eq != 0]
+    
+    if plot:
+        time = np.arange(initial, T-thinning, thinning)
+        plt.plot(time, mutual_info_eq)
+        plt.title('Mutual info between consecutive thinned samples at equilibrium')
+        plt.ylabel('Mutual info')
+        plt.xlabel('Number of thinned consecutive steps')
+        if x_lim_dx is not None:
+            plt.xlim(initial, x_lim_dx)
+        plt.show()
+
+    return (mutual_info_eq)
+
+#CHANGED
+def results_accuracy(G, max_step, f_list, n_burn_in, thinning, plot = True):
+    #Missing results
+    res_missing = []
+    for i in range(len(f_list)):
+        f = f_list[i]
+        N = len(G.nodes)
+        links = list(G.edges)
+        links_obs = remove_links(links, f)
+        
+        chain = metropolis(N, links_obs, max_step)
+        chain = change_chain(chain, n_burn_in, thinning)
+        R_ = R_vector(chain, links_obs, G)
+        res_missing.append(roc_auc_score(R_[0], R_[1]))
+    
+    #Spurious results
+    res_spurious = []
+    for i in range(len(f_list)):
+        f = f_list[i]
+        N = len(G.nodes)
+        links = list(G.edges)
+        links_obs = add_links(N, links, 0.9)
+        
+        chain = metropolis(N, links_obs, max_step)
+        chain = change_chain(chain, n_burn_in, thinning)
+        R_ = R_vector(chain, links_obs, G)
+        res_spurious.append(roc_auc_score(R_[0], R_[1]))
+
+    if plot:
+        plt.plot(f_list, res_missing, marker = 'o')
+        plt.xlabel('Fraction of links removed f', fontsize = 15)
+        plt.ylabel('Accuracy', fontsize = 15)
+        plt.title('Missing interactions')
+        plt.show()
+        
+        plt.plot(f_list, res_spurious, marker = 'o')
+        plt.xlabel('Fraction of links added f', fontsize = 15)
+        plt.ylabel('Accuracy', fontsize = 15)
+        plt.title('Spurious interactions')
+        plt.show()
+
+    return (res_missing, res_spurious)
+
+def get_links_A(adjacency_A):
+
+    N = adjacency_A.shape[0]
+    indices_triu = np.triu_indices(N)
+    mask = adjacency_A[np.triu_indices(N)]==1
+    i = indices_triu[0][mask]
+    j = indices_triu[1][mask]
+    links_A_array = np.concatenate((i.reshape(i.shape[0],1), j.reshape(j.shape[0],1)), axis=1)
+    links_A_list = links_A_array.tolist()
+    links_A = list(tuple(i) for x,i in enumerate(links_A_list))
+    
+    return links_A
+
+def get_RA(chain_new, adj, links_obs):
+    R_A = 0
+    Z = np.sum(chain_new[1])
+    for k in range(len(chain_new[1])):
+        group = chain_new[0][k]
+        N = len(group)
+        links_obs = links_obs
+        links_A = get_links_A(adj)
+        
+        r = get_r_vec(group,N)
+        l_o =  get_l_vec(group, N, links_obs) 
+        l =  get_l_vec(group, N, links_A)
+
+        
+        log_1 = np.log(((r+1)/(2*r+1))[np.triu_indices(N)])
+        log_2 = np.log((binom(r,l_o)/binom(2*r,l_o+l))[np.triu_indices(N)])
+        h_A = math.exp(np.sum( log_1 + log_2)+200)
+        
+        
+        R_A_k = h_A*chain_new[1][k]
+        
+        R_A = R_A + R_A_k
+
+    R_A = R_A/Z
+    
+    return(R_A)
+
+def reconstruction(chain_new, links_obs, N, max_step, G):
+    triu = np.triu_indices(N)
+
+    adj_init = np.zeros((N,N))
+    adj_init[np.array(links_obs).T[0],np.array(links_obs).T[1]] = 1
+    adj_init[np.array(links_obs).T[1],np.array(links_obs).T[0]] = 1
+    links_init_pos = adj_init[triu]
+    links_init = links_obs
+
+    kk = 1
+
+    max_value = -np.inf
+    best_A = adj_init
+
+    adj_curr = np.copy(adj_init)
+    links_curr = links_init
+
+    p=0 #contador acceptance
+    for t in range(max_step):
+        if kk == 0:
+            break
+        else:
+            R = R_vector(chain_new, links_curr, G)
+            ### ascending
+            ind_ascending = np.argsort(R[1])
+            existing_links = np.where(links_init_pos==1)
+            intersect_asc = ind_ascending[np.sort(np.intersect1d( existing_links[0],ind_ascending ,return_indices=True)[2])]
+
+            delete_i = triu[0][intersect_asc]
+            delete_j = triu[1][intersect_asc]
+
+            ## descending
+            ind_descending = np.argsort(R[1])[::-1]
+            non_existing_links = np.where(links_init_pos==0)
+            intersect_desc = ind_descending[np.sort(np.intersect1d( non_existing_links[0],ind_descending ,return_indices=True)[2])]
+
+            create_i = triu[0][intersect_desc]
+            create_j = triu[1][intersect_desc]
+
+            stop = 0
+            kk = 0
+
+            RA_curr = get_RA(chain_new, adj_curr, links_obs)
+
+            for s in range(min(len(create_i),len(delete_i))):
+
+                if stop < 5:
+
+                    adj_prop = np.copy(adj_curr)
+                    adj_prop[create_i[s],create_j[s]] = 1
+                    adj_prop[delete_i[s],delete_j[s]] = 0
+
+                    RA_prop = get_RA(chain_new, adj_prop, links_obs)
+
+                    #rnd = np.random.random(1)
+
+                    acceptance = RA_prop/RA_curr
+                    if 1 < acceptance:
+                        p = p+1
+
+                        adj_curr = adj_prop
+                        RA_curr = RA_prop
+                        kk = kk + 1
+                        stop = 0
+                        if RA_curr > max_value:
+                            max_value = RA_curr
+                            best_A = adj_curr
+
+                    else:
+                        stop = stop + 1
+                else:
+                    break
+
+            links_curr_pos = adj_curr[triu]
+            links_curr = get_links_A(adj_curr)
+    return (best_A, max_value, p)
+
+def get_A_from_links(N,links):
+    adj = np.zeros((N,N))
+    adj[np.array(links).T[0],np.array(links).T[1]] = 1
+    adj[np.array(links).T[1],np.array(links).T[0]] = 1
+    return(adj)
+
+def graph_properties(G, adj_obs_list, best_A_list):
+    
+    error = np.arange(0.1,1,0.1)
+
+    G_obs_list = []
+    G_rec_list = []
+
+    re_clus_obs_list = []
+    re_clus_rec_list = []
+
+    re_bt_obs_list = []
+    re_bt_rec_list = []
+
+    re_es_obs_list = []
+    re_es_rec_list = []
+
+    re_ass_obs_list = []
+    re_ass_rec_list = []
+
+    for i in range(len(error)):
+
+        G_obs = nx.from_numpy_array(adj_obs_list[i])
+        G_rec = nx.from_numpy_array(best_A_list[i])
+
+        G_obs_list.append(G_obs)
+        G_rec_list.append(G_rec)
+
+        ###### CLUSTERING
+
+        re_clus_obs = nx.average_clustering(G)-nx.average_clustering(G_obs)/nx.average_clustering(G)
+        re_clus_rec = nx.average_clustering(G)-nx.average_clustering(G_rec)/nx.average_clustering(G)
+
+        re_clus_obs_list.append(re_clus_obs)
+        re_clus_rec_list.append(re_clus_rec)
+
+        ###### MEAN BETWEENNESS
+
+        bt_array_G = np.array(list(nx.betweenness_centrality(G).values()))
+        bt_G = np.sum(bt_array_G)/bt_array_G.shape[0]
+
+        bt_array_G_obs = np.array(list(nx.betweenness_centrality(G_obs).values()))
+        bt_G_obs = np.sum(bt_array_G_obs)/bt_array_G_obs.shape[0]
+
+        bt_array_G_rec = np.array(list(nx.betweenness_centrality(G_rec).values()))
+        bt_G_rec = np.sum(bt_array_G_rec)/bt_array_G_rec.shape[0]
+
+        re_bt_obs = (bt_G-bt_G_obs)/bt_G
+        re_bt_rec = (bt_G-bt_G_rec)/bt_G
+
+        re_bt_obs_list.append(re_bt_obs)
+        re_bt_rec_list.append(re_bt_rec)
+
+        ###### MEAN EFFECTIVE SIZE
+
+        es_array_G = np.array(list(nx.effective_size(G).values()))
+        es_G = np.sum(es_array_G)/es_array_G.shape[0]
+
+        es_array_G_obs = np.array(list(nx.effective_size(G_obs).values()))
+        es_G_obs = np.sum(es_array_G_obs)/es_array_G_obs.shape[0]
+
+        es_array_G_rec = np.array(list(nx.effective_size(G_rec).values()))
+        es_G_rec = np.sum(es_array_G_rec)/es_array_G_rec.shape[0]
+
+        re_es_obs = (es_G-es_G_obs)/es_G
+        re_es_rec = (es_G-es_G_rec)/es_G
+
+        re_es_obs_list.append(re_es_obs)
+        re_es_rec_list.append(re_es_rec)
+
+        ###### ASSORTATIBITY
+
+        ass_G = nx.degree_assortativity_coefficient(G)
+        ass_G_obs = nx.degree_assortativity_coefficient(G_obs)
+        ass_G_rec = nx.degree_assortativity_coefficient(G_rec)
+
+        re_ass_obs = (ass_G-ass_G_obs)/ass_G
+        re_ass_rec = (ass_G-ass_G_rec)/ass_G
+
+        re_ass_obs_list.append(re_ass_obs)
+        re_ass_rec_list.append(re_ass_rec)
+
+    return (re_clus_obs_list, re_clus_rec_list, re_bt_obs_list, re_bt_rec_list, re_es_obs_list, re_es_rec_list, re_ass_obs_list, re_ass_rec_list)
+
+def reconstruction_errors(N, G, links):    
+    max_step = 500_000
+    burn_in = 15_000
+    thinning = 500
+
+    error = np.arange(0.1,1,0.1)
+
+    adj_obs_list = []
+    best_A_list = []
+    max_value_list = []
+    p_list = []
+    bad_links_list = []
+
+    for i in range(len(error)):
+        print('error = ', error[i])
+        bad_links = len(links)*error[i]
+
+        links_obs = add_and_remove_links(N, links, error[i])
+        adj_obs = get_A_from_links(N,links_obs)
+
+        chain = metropolis(N, links_obs, max_step)
+        chain_new = chain[0][burn_in::thinning] , chain[1][burn_in::thinning]
+
+        best_A, max_value, p = reconstruction(chain_new, links_obs, N, 20, G)
+
+        adj_obs_list.append(adj_obs)
+        best_A_list.append(best_A)
+        max_value_list.append(max_value)
+        p_list.append(p)
+        bad_links_list.append(bad_links)
+    return (adj_obs_list, best_A_list, max_value_list, p_list, bad_links_list)
+
+def properties_plots(clus_obs, clus_rec, bt_obs, bt_rec, es_obs, es_rec, ass_obs, ass_rec):
+    
+    error = np.arange(0.1,1,0.1)
+    error_ = np.concatenate((error[0:5], error[6:]))
+    es_obs_ = np.concatenate((es_obs[0:5], es_obs[6:]))
+    es_rec_ = np.concatenate((es_rec[0:5], es_rec[6:]))
+
+## MAKE PLOTS
+    fig, axs = plt.subplots(2, 2,sharex=True ,sharey=True)
+
+    axs[0,0].plot(error,clus_obs,marker='o',label = 'Observed')
+    axs[0,0].plot(error,clus_rec,marker='o',label = 'Reconstructed')
+    axs[0,0].set_title('Clustering')
+    axs[0,0].set_ylim(-1.8,1.8)
+    axs[0,0].set_ylabel('Realtive error')
+    axs[0,0].axhline(y=0, color = 'black', linestyle='--')
+    #axs[0,0].set_xlabel('Ratio of missing and spurious links')
+
+    axs[0,1].plot(error,bt_obs,marker='o')
+    axs[0,1].plot(error,bt_rec,marker='o')
+    axs[0,1].set_title('Betweeness')
+    axs[0,1].set_ylim(-1.8,1.8)
+    axs[0,1].axhline(y=0, color = 'black', linestyle='--')
+    #axs[0,1].set_ylabel('Realtive error')
+    #axs[0,1].set_xlabel('Ratio of missing and spurious links')
+
+    axs[1,0].plot(error_,es_obs_,marker='o')
+    axs[1,0].plot(error_,es_rec_,marker='o')
+    axs[1,0].set_title('Effective size')
+    axs[1,0].set_ylim(-1.8,1.8)
+    axs[1,0].axhline(y=0, color = 'black', linestyle='--')
+    axs[1,0].set_ylabel('Realtive error')
+    axs[1,0].set_xlabel('Ratio of missing and spurious links')
+
+    axs[1,1].plot(error,ass_obs,marker='o', label = 'Observed')
+    axs[1,1].plot(error,ass_rec,marker='o', label = 'Reconstructed')
+    axs[1,1].set_title('Assortativity')
+    axs[1,1].set_ylim(-1.8,1.8)
+    axs[1,1].axhline(y=0, color = 'black', linestyle='--')
+    #axs[1,1].set_ylabel('Realtive error')
+    axs[1,1].set_xlabel('Ratio of missing and spurious links')
+    axs[1,1].legend()
+    
+    plt.show()
+    return 
