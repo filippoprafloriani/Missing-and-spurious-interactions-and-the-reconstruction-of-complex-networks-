@@ -1,2 +1,5 @@
 # Missing-and-spurious-interactions-and-the-reconstruction-of-complex-networks-
-Recognize spurious and missing links from a Network, by following a statistical model, where it is assumed that all the networks are block stochastic networks. The main issue to solve is how to compute the sum over all the possible configurations (or commpute the partition function). To do that the Metropolis algorithm is employed.
+
+File .py containing all the functions used in the Jupyter notebook.
+
+Jupyter notebook in Python with the code.
